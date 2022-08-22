@@ -1,0 +1,26 @@
+
+
+BEGIN MRBAYES;
+
+[Load matrix]
+exe test2.nex;
+
+[Preliminar Sets]
+log start filename = test2.txt;
+
+[Models]
+lset rates = gamma coding = variable; 
+
+[Priors]
+prset brlenspr = Unconstrained:Exp(10) ratepr = variable;
+
+[MCMCMCMC]
+mcmc ngen = 5000000 nruns = 2 nchains = 4 printfreq = 1000 samplefreq = 1000 diagnfreq = 1000 burninfrac = 0.25 filename = test2;
+
+[Summary of tree topologies and branch lengths]
+sumt filename = test2;
+
+[Summary of parameters]
+sump filename = test2;
+
+END;
