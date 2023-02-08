@@ -1,0 +1,605 @@
+---
+title: "**rphenoscate: Study Case 3**"
+author: "Diego S. Porto, Sergei Tarasov, Caleb Charpentier, and SCATE team"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    citation_package: natbib
+bibliography: references.bib
+biblio-style: "apalike"
+---
+
+
+```{r setup, eval = TRUE, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# PART 1. Benchmarking inferred character matrices.
+
+
+In this third study case, we will be using *rphenoscate* and *rphenoscape* to assemble a phylogenetic character matrix from annotated phenotypes of fishes available in the Phenoscape Knowledgebase (KB). Particularly, we will be using the data set of \citet{dillman2016} as a benchmark, which consists of 173 species of anostomoid fishes and 463 morphological characters. We will be comparing the 'original' data set (i.e., character matrix retrieved from the original paper) with an 'inferred' data set built from phenotype annotations of the same study. The aim is to demonstrate that 'synthetic' matrices retain most of the phylogenetic information of standard character matrices thus allowing phylogenetic inferences with ontology annotated morphological data.
+
+
+# STEP 1. Installing and loading the packages.
+
+If you have not installed the package yet, then run the following:
+```{r eval = FALSE, include = TRUE, message = FALSE}
+remotes::install_github("phenoscape/rphenoscape", build_vignettes = TRUE)
+```
+
+You should also install its companion package *rphenoscape* that allows access to the Phenoscape KB.
+```{r eval = FALSE, include = TRUE, message = FALSE}
+remotes::install_github("uyedaj/rphenoscate", build_vignettes = TRUE)
+```
+
+Now, let's load the packages *rphenoscape* and *rphenoscate*.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+library("rphenoscape")
+library("rphenoscate")
+```
+
+Let's load some other packages that might be useful as well. If you do not have they installed, please do so. In particular, *TreeTools* (\citealp{smith2019treetools}) allows us to import character matrices in NEXUS format and calculate some information metrics from phylogenetic characters. *TreeDist* (\citealp{smith2020treedist}) allows us to calculate additional information metrics from phylogenetic trees.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+library("ape")
+library("TreeTools")
+library("TreeDist")
+library("tibble")
+library("stringr")
+library("ggplot2")
+library("viridis")
+```
+
+
+# STEP 2. Assembling the data set from a given study.
+
+First, let's retrieve the phylogenetic character matrix from \citet{dillman2016}.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Retrieve the phylogenetic character matrix from Dillman et al (2016).
+studies <- get_studies()
+
+# Get a particular study # (Change this part to get a particular study).
+study <- studies$id[studies$label == 'Dillman et al. (2016)']
+
+# Get NeXML data.
+selected_study <- get_study_data(study)
+
+# Build the original character matrix.
+char_mat <- RNeXML::get_characters(selected_study[[1]])
+```
+
+Sometimes, data sets might have rows and/or columns represented as IRIs or character IDS instead of actual human-readable labels. Let's check for that.
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Get rownames and colnames from data set.
+row_mat <- rownames(char_mat)
+col_mat <- colnames(char_mat)
+
+# Check rownames and colnames from data set.
+row_mat[1:3]
+col_mat[1:3]
+```
+
+If rownames and/or colnames are IRIs and/or character IDs, then run the code below to extract the original labels.
+```{r eval = FALSE, include = TRUE, message = FALSE}
+# Get metadata the original character matrix.
+selected_study_meta <- get_char_matrix_meta(selected_study[[1]])
+
+# Get rownames and colnames from data set.
+row_mat <- selected_study_meta[[1]]$id_taxa$label[
+  match(rownames(char_mat), selected_study_meta[[1]]$id_taxa$otu)]
+
+col_mat <- selected_study_meta[[1]]$id_entities$label[
+  match(colnames(char_mat),selected_study_meta[[1]]$id_entities$char)]
+```
+
+
+# STEP 3. Getting all semantic phenotypes from a given study.
+
+Now, let's retrieve all phenotype annotations from the Phenoscape KB corresponding to characters statements in the \citet{dillman2016} study. As mentioned elsewhere, Phenoscape KB contains expert annotated phenotypes for several studies of fishes. In each study, character statements were converted to semantic statements using a formal syntax, the Entity-Quality syntax (EQ). Character statements can be manually annotated with terms from an anatomy ontology for the anatomical entities (in this case UBERON) and a phenotype ontology for the qualities of entities (in this case PATO) using the software Phenex (\citealp{balhoff2010, balhoff2014}).
+```{r eval = FALSE, include = TRUE, message = FALSE}
+# Retrieve all semantic phenotypes from the Phenoscape KB.
+# Get all phenotype data from the study.
+phenotypes <- get_phenotypes(study = study)
+
+# Convert data to a phenotype object (Warning: 10~30 min).
+selected_study_obj <- as.phenotype(phenotypes, withTaxa = TRUE)
+
+# Get all character information from the phenotype object.
+selected_study_chars <- chars(selected_study_obj)
+
+# Filter characters based on target study.
+selected_study_chars_filter <- lapply(selected_study_chars, function(x) x[
+  grepl(selected_study_chars$study.id, pattern = study)] )
+```
+
+```{r eval = TRUE, include = FALSE, message = FALSE}
+# This chunk of code imports pre-computed heavy objects.
+# Load large object.
+phenotypes <- readRDS("data/phenotypes.RDS")
+selected_study_obj <- readRDS("data/selected_study_obj.RDS")
+selected_study_chars <- readRDS("data/selected_study_chars.RDS")
+selected_study_chars_filter <- readRDS("data/selected_study_chars_filter.RDS")
+```
+
+The phenotype annotations retrieved from the Phenoscape KB can be found in the 'selected_study_obj'. Each element of this object contains information for a given phenotype annotation, including phenotype ID, label, taxonomic distribution, etc. The object 'selected_study_chars_filter' contains information for character and character state data associated with each phenotype annotation, including character and character state labels as in the reference study (i.e., \citealp{dillman2016}).
+
+
+# STEP 4. Obtaining mutual exclusivity information.
+
+Now that we have all phenotype annotations from \citet{dillman2016}, we need to assemble them in a character matrix. The core idea here is that each phenotype annotation (i.e, a semantic statement expressed through the EQ syntax) might correspond to an individual character statement about a quality of a taxon or group of taxa. In simple terms, characters in a standard character matrix can be seen as collections of two or more semantic statements. For example, the semantic statements 'anatomical region and (anterior_to some pelvic fin) circular' and 'anatomical region and (anterior_to some pelvic fin) concave' compose the phylogenetic character 'Form of prepelvic region of ventral body surface'. To cluster phenotype annotations into characters, *rphenoscate* parses information from the Phenoscape KB to classify pairs of phenotypes into exclusivity classes using functions from *rphenoscape*. For more details, refer to the documentation of the 'mutually_exclusive' function of *rphenoscape*. In a nutshell, 'strong_exclusivity' indicates putative pairs of mutually exclusive phenotypes that might correspond to alternative character states of a phylogenetic character. Alternatively, 'strong_compatibility' indicates phenotypes that describe redundant information, therefore, states that can be fused.
+
+Let's obtain the exclusivity classes for all phenotypes annotated in the \citet{dillman2016}.
+```{r eval = FALSE, include = TRUE, message = FALSE}
+# Determine mutual exclusivity (Warning: 10~30 min).
+exclusivity <- mutually_exclusive(phenotypes$id, studies = study)
+```
+
+```{r eval = TRUE, include = FALSE, message = FALSE}
+# This chunk of code imports pre-computed heavy objects.
+# Load large object.
+exclusivity <- readRDS("data/exclusivity.RDS")
+```
+
+
+# STEP 5. Building characters from phenotype descriptions.
+
+Then, let's use the information on mutual exclusivity classes to extract clusters of semantic statements and build putative characters.
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Extract character clusters.
+CH <- extract.chars(exclusivity)
+
+# Build characters.
+CH_selected_study <- build.chars(CH, selected_study_chars_filter)
+```
+
+The object 'CH_selected_study' includes information on putative characters inferred from the exclusivity classes obtained in the previous step. 'solved' comprises phenotype annotations that were clustered as characters as inferred from evidence of 'strong_compatibility' whereas 'unsolved' comprises phenotype annotations that could not be assigned unambiguously to a particular character.
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Quick checks.
+# Solved characters.
+CH_selected_study$solved$chars[1:3]
+CH_selected_study$solved$tokens[1:3]
+
+# Number of solved characters.
+length(CH_selected_study$solved$chars)
+
+# Unsolved characters.
+CH_selected_study$unsolved$chars[1:3]
+CH_selected_study$unsolved$tokens[1:3]
+
+# Number of unsolved characters.
+length(CH_selected_study$unsolved$chars)
+```
+
+
+# STEP 6. Building character matrices.
+
+Finally, let's build a synthetic character matrix based on the characters inferred from exclusivity information.
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Get set of taxa.
+tax <- unique(row_mat)
+
+# Build character matrix for inferred characters.
+char_mat_infer <- build.matrix(tax, selected_study_obj,
+                               selected_study_chars_filter, CH_selected_study)
+```
+
+
+# STEP 7. Phylogenetic inferences with the original and synthetic character matrices.
+
+Now, we can finally compare the original and inferred character matrices to assess how well semantic phenotypes carry the phylogenetic properties of morphological data as observed in standard character matrices. 
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Copy phylogenetic matrices.
+m_original <- char_mat
+m_inferred <- char_mat_infer
+```
+
+Sometimes, data sets might contain some duplicated rows (taxa) due to taxonomic changes. Let's check for that.
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Check for duplicated taxa.
+any(duplicated(row_mat))
+```
+
+If duplicated rows were found, then taxa must be merged and non-matching character states must be coded as polymorphisms. If that is the case, then run the code below. 
+```{r eval = FALSE, include = TRUE, message = FALSE}
+# Get duplicated taxa.
+dup <- row.mat[duplicated(row_mat)]
+
+# Merge duplicated taxa.
+for(i in 1:length(dup)){
+
+  x <- grep(row_mat, pattern = dup[i])
+
+  y <- apply(m_original[x,],2, function(x) paste0(unique(x), collapse = " and "), 
+             simplify = F)
+
+  m_original[x[1],] <- y
+  m_original <- m_original[-x[2],]
+
+}
+```
+
+Then, let's format taxon labels, character matrices entries, and command blocks to perform Bayesian Inference with MrBayes. First, let's format character matrices.
+```{r eval = TRUE, include = TRUE, message = FALSE}
+# Prepare data for phylogenetic analyses.
+# Reorganize taxon labels (for MrBayes).
+tax_lab <- str_replace_all(tax, pattern = "\\?", replacement = "")
+tax_lab <- str_replace_all(tax_lab, pattern = "\\(", replacement = "")
+tax_lab <- str_replace_all(tax_lab, pattern = "\\)", replacement = "")
+tax_lab <- str_replace_all(tax_lab, pattern = " ", replacement = "_")
+
+# Recode polymorphisms (manually) from the original matrix (for MrBayes).
+m_original[is.na(m_original)] <- "?"
+m_original <- apply(m_original, 2, function(x) 
+  str_replace_all(x, pattern = "NA", replacement = "?"))
+m_original <- apply(m_original, 2, function(x) 
+  str_replace_all(x, pattern = " and ", replacement = ","))
+m_original <- apply(m_original, 2, function(x) 
+  str_replace_all(x, pattern = "^\\?,", replacement = ""))
+m_original <- apply(m_original, 2, function(x) 
+  str_replace_all(x, pattern = ",\\?$", replacement = ""))
+m_original <- apply(m_original, 2, function(x) 
+  str_replace_all(x, pattern = "^(\\d),", replacement = "(\\1,"))
+m_original <- apply(m_original, 2, function(x) 
+  str_replace_all(x, pattern = ",(\\d)$", replacement = ",\\1)"))
+rownames(m_original) <- rownames(m_inferred) <- tax_lab
+```
+
+Then, set parameters for the MCMC. These can be changed if desired.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Set MCMC parameters (change if desired).
+gens = 5000000
+runs = 2
+chains = 4
+
+# Build MrBayes command block.
+mb_block <- readLines("data/mb_block.nex")
+mb_block <- gsub(mb_block, pattern = "&&ngens&&", 
+                 replacement = format(gens, scientific = FALSE))
+mb_block <- gsub(mb_block, pattern = "&&nruns&&", replacement = runs)
+mb_block <- gsub(mb_block, pattern = "&&nchains&&", replacement = chains)
+mb_block_original <- gsub(mb_block, pattern = "&&filename&&", replacement = "original")
+mb_block_inferred <- gsub(mb_block, pattern = "&&filename&&", replacement = "inferred")
+
+# Create directory to run analyses.
+dir.create("mrbayes")
+
+# Export nexus files.
+write.nexus.data(as.matrix(m_original), format = "standard", 
+                 interleaved = FALSE, file = "mrbayes/original.nex")
+write.nexus.data(as.matrix(m_inferred), format = "standard", 
+                 interleaved = FALSE, file = "mrbayes/inferred.nex")
+
+# Write MrBayes command block.
+write(mb_block_original, file = "mrbayes/run_original.nex")
+write(mb_block_inferred, file = "mrbayes/run_inferred.nex")
+```
+
+
+# STEP 8. Bayesian Inferences on MrBayes.
+Run the analyses of 'run_original.nex' and 'run_inferred.nex' from within the 'mrbayes' folder.
+
+
+# STEP 9. Evaluating phylogenetic properties of data sets.
+
+Now, let's examine the phylogenetic properties of the data. By that, we mean comparing the phylogenetic information content available for tree inference from the 'original' and 'inferred' character matrices. Systematists often construct character matrices in order to infer the phylogenetic relationships among taxa. In other words,one of the major goals of assembling character matrices is tree inference. Therefore, assessing the phylogenetic information content and tree topologies inferred from these matrices is a natural way to assess how useful 'synthetic' character matrices can be for phylogeneticts in general.
+
+First, let's measure the cladistic information content sensu \citet{steel2005} from all characters in the 'original' and 'inferred' character matrices. For that, we will use a function from *TreeTools* (\citealp{smith2019treetools}). For more discussions about information theory used in the context of tree distance metrics see \citet{smith2020}.
+
+For importing the consensus trees and tree samples from all analyses, run the following chunk of code:
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# This chunk of code imports the tree samples and consensuses obtained from MrBayes in this study.
+# Import consensus results from MrBayes.
+tree_ori <- read.nexus(file = "mrbayes/original.con.tre")
+tree_inf <- read.nexus(file = "mrbayes/inferred.con.tre")
+
+# Import tree samples #
+trees_ori.r1 <- read.nexus(file = "mrbayes/original.run1.t")
+trees_ori.r2 <- read.nexus(file = "mrbayes/original.run2.t")
+trees_inf.r1 <- read.nexus(file = "mrbayes/inferred.run1.t")
+trees_inf.r2 <- read.nexus(file = "mrbayes/inferred.run2.t")
+```
+
+Then, for calculating the phylogenetic information content from both character matrices, run the following:
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Copy original character matrix objects.
+c_original <- char_mat
+c_inferred <- char_mat_infer
+
+# Reorganize tokens and recode polymorphisms and missings.
+c_original[is.na(c_original)] <- "?"
+c_original <- apply(c_original, 2, function(x) 
+  str_replace_all(x, pattern = "(.) and (.)", replacement = "?"))
+c_inferred <- apply(c_inferred, 2, function(x) 
+  str_replace_all(x, pattern = "(.),(.),(.),(.)", replacement = "?"))
+c_inferred <- apply(c_inferred, 2, function(x) 
+  str_replace_all(x, pattern = "(.),(.),(.)", replacement = "?"))
+c_inferred <- apply(c_inferred, 2, function(x) 
+  str_replace_all(x, pattern = "(.),(.)", replacement = "?"))
+c_inferred <- apply(c_inferred, 2, function(x) 
+  str_replace_all(x, pattern = "^\\(", replacement = ""))
+c_inferred <- apply(c_inferred, 2, function(x) 
+  str_replace_all(x, pattern = "\\)$", replacement = ""))
+
+# Calculate information metrics per-character across the matrix.
+c_original <- apply(c_original, 2, function(x) CharacterInformation(x) )
+c_inferred <- apply(c_inferred, 2, function(x) CharacterInformation(x) )
+
+# Summary.
+summary(c_original)
+summary(c_inferred)
+```
+
+Now, let's make plot comparing the phylogenetic information of the 'original' and 'inferred' matrices.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Build data.frame.
+DF1 <- data.frame(value = c(c_original, c_inferred),
+                  name = c(rep("original", length(c_original)), 
+                           rep("inferred", length(c_inferred))))
+
+ggplot(data = DF1, aes(x = name, y = value, fill = name)) + geom_boxplot() +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.6) +
+  ggtitle("Phylogenetic Information (Steel and Penny 2006)") + xlab("Information (bits)")
+```
+
+```{r eval = FALSE, include = FALSE}
+# Run this chunk of code to obtain Figure 6A.
+# Create directory to save figures.
+dir.create("figures")
+
+# FIGURE ANOST A #
+pdf(file = "figures/anost_a.pdf")
+
+ggplot(data = DF1, aes(x = name, y = value, fill = name)) + geom_boxplot() +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.6) +
+  ggtitle("Phylogenetic Information (Steel and Penny 2006)") + xlab("Information (bits)")
+
+dev.off()
+```
+
+Now, let's make plot comparing the consensus trees of the 'original' and 'inferred' matrices.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+par(mfrow = c(1,2), mar = c(0.1,0.1,1.0,0.1))
+plot.phylo(tree_ori, show.tip.label = FALSE, edge.width = 1)
+plot.phylo(tree_inf, show.tip.label = FALSE, edge.width = 1)
+```
+
+```{r eval = FALSE, include = FALSE}
+# Run this chunk of code to obtain Figure 6B.
+# Create directory to save figures.
+dir.create("figures")
+
+# FIGURE ANOST B #
+pdf(file = "figures/anost_b.pdf")
+
+par(mfrow = c(1,2), mar = c(0.1,0.1,1.0,0.1))
+plot.phylo(tree_ori, show.tip.label = FALSE, edge.width = 1)
+plot.phylo(tree_inf, show.tip.label = FALSE, edge.width = 1)
+
+dev.off()
+```
+
+Now, let's measure the phylogenetic information from splits in the consensus trees obtained from both character matrices. For that, we will use functions from *TreeDist* (\citealp{smith2020treedist}). 
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Calculate generalize Robinson-Foulds distances among trees.
+# Set burnins.
+trees_ori.r1 <- trees_ori.r1[-c(1:1001)]
+trees_ori.r2 <- trees_ori.r2[-c(1:1001)]
+trees_inf.r1 <- trees_inf.r1[-c(1:1001)]
+trees_inf.r2 <- trees_inf.r2[-c(1:1001)]
+
+# Organize labels.
+names(trees_ori.r1) <- paste0("T", 1:length(trees_ori.r1), ".R1")
+names(trees_ori.r2) <- paste0("T", 1:length(trees_ori.r2), ".R2")
+names(trees_inf.r1) <- paste0("T", 1:length(trees_inf.r1), ".R1")
+names(trees_inf.r2) <- paste0("T", 1:length(trees_inf.r2), ".R2")
+
+# Join chains.
+trees_ori_join <- c(trees_ori.r1, trees_ori.r2)
+trees_inf_join <- c(trees_inf.r1, trees_inf.r2)
+
+# Calculate generalized RF.
+# Non-crossed: each consensus vs. its own distribution.
+RF1 <- TreeDistance(tree1 = tree_ori, tree2 = trees_ori_join)
+RF2 <- TreeDistance(tree1 = tree_inf, tree2 = trees_inf_join)
+
+# Crossed: each consensus vs. the other distribution.
+RF1_cross <- TreeDistance(tree1 = tree_ori, tree2 = trees_inf_join)
+RF2_cross <- TreeDistance(tree1 = tree_inf, tree2 = trees_ori_join)
+
+# Build data.frame.
+DF2 <- data.frame(value = c(RF1, RF1_cross), name =
+                    c(rep("original", length(RF1)), rep("inferred", length(RF1_cross))))
+DF3 <- data.frame(value = c(RF2, RF2_cross), name =
+                    c(rep("original", length(RF2)), rep("inferred", length(RF2_cross))))
+```
+
+Finally, let's visualize the posterior tree distributions inferred from both data sets. There are several alternatives for visualizing the posterior tree space (for more details see \citealp{smith2022} for example). Here, let's keep it simple and just use the generalized Robinson-Foulds distances (\citealp{smith2020}) from each tree topology in the posterior distribution relative to a given consensus tree and plot the histograms. Let's compare each distribution to the consensus tree obtained from the 'original' and 'inferred' data sets.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Consensus from the original matrix.
+ggplot(data = DF2, aes(x = value, fill = name)) +
+  geom_histogram(color = "#e9ecef", alpha = 0.6, position = 'identity') +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.6) +
+  ggtitle("Distributions vs. original consensus") +
+  xlab("Generalized Robinson-Foulds Distances (Smith 2020)")
+
+# Consensus from the inferred matrix.
+ggplot(data = DF3, aes(x = value, fill = name)) +
+  geom_histogram(color = "#e9ecef", alpha = 0.6, position = 'identity') +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.6) +
+  ggtitle("Distributions vs. inferred consensus") +
+  xlab("Generalized Robinson-Foulds Distances (Smith 2020)")
+```
+
+```{r eval = FALSE, include = FALSE}
+# Run this chunk of code to obtain Figure 6C.
+# Create directory to save figures.
+dir.create("figures")
+
+# FIGURE ANOST C #
+pdf(file = "figures/anost_c.pdf")
+
+ggplot(data = DF2, aes(x = value, fill = name)) +
+  geom_histogram(color = "#e9ecef", alpha = 0.6, position = 'identity') +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.6) +
+  ggtitle("Distributions vs. original consensus") +
+  xlab("Generalized Robinson-Foulds Distances (Smith 2020)")
+
+dev.off()
+```
+
+```{r eval = FALSE, include = FALSE}
+# Run this chunk of code to obtain Figure 6D.
+# Create directory to save figures.
+dir.create("figures")
+
+# FIGURE ANOST D #
+pdf(file = "figures/anost_d.pdf")
+
+ggplot(data = DF3, aes(x = value, fill = name)) +
+  geom_histogram(color = "#e9ecef", alpha = 0.6, position = 'identity') +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.6) +
+  ggtitle("Distributions vs. inferred consensus") +
+  xlab("Generalized Robinson-Foulds Distances (Smith 2020)")
+
+dev.off()
+```
+
+
+# PART 2. Assembling synthetic character matrices.
+
+
+As a second demonstration of *rphenoscate* and *rphenoscape*, let's retrieve all semantic phenotypes available at the Phenoscape KB for fishes in the family Characidae and assemble a synthetic character matrix.
+
+First, let's get all phenotypes from Characidae.
+```{r eval = FALSE, include = TRUE, message = FALSE, warning = FALSE}
+# Get all phenotype data from Characidae.
+phenotypes_chara <- get_phenotypes(taxon = "Characidae")
+
+# Convert data to a phenotype object (Warning: >=30 min).
+phenotypes_chara_obj <- as.phenotype(phenotypes_chara, withTaxa = TRUE)
+
+# Get all character information from the phenotype object.
+phenotypes_chara_char <- chars(phenotypes_chara_obj)
+```
+
+```{r eval = TRUE, include = FALSE, message = FALSE}
+# This chunk of code imports pre-computed heavy objects.
+# Load large object.
+phenotypes_chara <- readRDS("data/phenotypes_chara.RDS")
+phenotypes_chara_obj <- readRDS("data/phenotypes_chara_obj.RDS")
+phenotypes_chara_char <- readRDS("data/phenotypes_chara_char.RDS")
+```
+
+Then, let's get the mutual exclusivity information using *rphenoscape*.
+```{r eval = FALSE, include = TRUE, message = FALSE, warning = FALSE}
+exclusivity_pk_full <- mutually_exclusive(phenotypes_chara$id)
+```
+
+```{r eval = TRUE, include = FALSE, message = FALSE}
+# This chunk of code imports pre-computed heavy objects.
+# Load large object.
+exclusivity_pk_full <- readRDS("data/exclusivity_pk_full.RDS")
+```
+
+And then assemble a synthetic character matrix from semantic phenotypes.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Extract character clusters.
+CH_chara <- extract.chars(exclusivity_pk_full)
+
+# Build characters.
+CH_clusters <- build.chars(CH_chara, phenotypes_chara_char)
+
+# Get all species names.
+tax_chara <- lapply(phenotypes_chara_obj, function(x) x$taxa$label )
+tax_chara <- unique(unlist(tax_chara))
+
+# Filter species names (can take some time!).
+#chara <- logical()
+#k = 1 
+#for(i in k:length(tax_chara)){
+#
+#  chara[i] <- is_descendant(term = "Characidae", candidates = tax_chara[i])
+#
+#}
+#tax_chara <- tax_chara[chara]
+#tax_chara <- tax_chara[!is.na(tax_chara)]
+
+# Import filtered taxon names.
+tax_chara <- readRDS("data/tax_chara.RDS")
+
+# Building a character matrix.
+M <- build.matrix(tax_chara, phenotypes_chara_obj, phenotypes_chara_char, CH_clusters)
+```
+
+Finally, let's filter the data set and recode states as binary just to emphasize cells with data vs. non-data, irrespective of the actual character states.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Organize data.
+M_org <- M
+M_org[M_org != "?"] <- 1
+M_org[M_org == "?"] <- 0
+M_inf <- as.matrix(type.convert(M_org, as.is = "numeric"))
+
+# Filter taxa and characters with no information.
+v1 <- !apply(M_inf, 1, sum) == 0
+v2 <- !apply(M_inf, 2, sum) == 0
+M_inf <- M_inf[v1,]
+M_inf <- M_inf[,v2]
+
+# Check matrix size.
+dim(M_inf)
+
+# Get taxon coverage.
+tax_cover <- round(apply(M_inf, 1, sum)/dim(M_inf)[2],4)
+tax_cover[1:5]
+
+# Get character coverage.
+char_cover <- round(apply(M_inf, 2, sum)/dim(M_inf)[1],4)
+char_cover[1:5]
+```
+
+And then plot the synthetic character matrix.
+```{r eval = TRUE, include = TRUE, message = FALSE, warning = FALSE}
+# Build a Heatmap and export figure.
+# Build data set.
+M_plot <- expand.grid(X = rownames(M_inf), Y = colnames(M_inf))
+M_plot$Z <- factor(as.vector(M_inf))
+
+ggplot(M_plot, aes(x = Y, y = X, fill = Z)) + geom_tile(alpha = 0.8) +
+  scale_fill_manual("Data",values = c("grey100", "orange") ) +
+  theme(axis.text.y = element_text(size = 1, angle = 0, hjust = 1),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank()) +
+  ylab("Taxa") + xlab("Characters")
+```
+
+```{r eval = FALSE, include = FALSE}
+# Run this chunk of code to obtain Figure 7.
+# Create directory to save figures.
+dir.create("figures")
+
+# FIGURE SYNTHMAT #
+# Export PDF.
+pdf(file = "figures/synthmat.pdf")
+
+ggplot(M_plot, aes(x = Y, y = X, fill = Z)) + geom_tile(alpha = 0.8) +
+  scale_fill_manual("Data",values = c("grey100", "orange") ) +
+  theme(axis.text.y = element_text(size = 1, angle = 0, hjust = 1),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank()) +
+  ylab("Taxa") + xlab("Characters")
+
+dev.off()
+
+# Export PNG.
+ggplot(M_plot, aes(x = Y, y = X, fill = Z)) + geom_tile(alpha = 0.8) +
+  scale_fill_manual("Data",values = c("grey100", "orange") ) +
+  theme(axis.text.y = element_text(size = 1.5, angle = 0, hjust = 1),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank()) +
+  ylab("Taxa") + xlab("Characters")
+
+ggsave("figures/synthmat.png", units = "in", width = 4, height = 4, dpi = 800)
+```
