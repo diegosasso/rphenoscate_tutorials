@@ -138,7 +138,7 @@ state_data <- chars[char_sample]
 ```
 
 ```{r eval = FALSE, include = FALSE}
-# Run this chunk of code to obtain Table 2.
+# Run this chunk of code to obtain Table S2.
 
 # TABLE BEES #
 # Organize data and labels.

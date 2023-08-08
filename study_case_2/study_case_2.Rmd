@@ -79,7 +79,7 @@ nex <- RNeXML::get_characters(nex)
 ```
 
 ```{r eval = FALSE, include = FALSE}
-# Run this chunk of code to obtain Table 3.
+# Run this chunk of code to obtain Table S3.
 
 # TABLE CHARA #
 # Organize data and labels #
